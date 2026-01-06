@@ -312,6 +312,16 @@ def clear_and_seed_demo_db():
     conn.commit()
     conn.close()
 
+
+def clear_db():
+    """Remove all rows from transactions and bank_accounts (no demo seed)."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM transactions")
+    cur.execute("DELETE FROM bank_accounts")
+    conn.commit()
+    conn.close()
+
 # Ensure DB initialized and session_state loaded
 # NOTE: Do not auto-seed demo data on first run. Leave DB empty for fresh deploys.
 if 'transactions' not in st.session_state or 'bank_accounts' not in st.session_state:
@@ -678,12 +688,26 @@ elif page == "Ayarlar":
     col1, col2 = st.columns(2)
     with col1:
         st.warning("Verileri Sıfırla")
-        if st.button("Tüm Verileri Sil ve Demoya Dön"):
-            clear_and_seed_demo_db()
-            st.session_state.transactions = load_transactions_from_db()
-            st.session_state.bank_accounts = load_bank_accounts_from_db()
-            st.success("Veriler sıfırlandı ve demo yüklendi.")
+        # Require explicit confirmation before performing destructive clear
+        if st.button("Bütün Verileri Temizle", key="request_clear"):
+            st.session_state['confirm_clear'] = True
             st.rerun()
+
+        if st.session_state.get('confirm_clear'):
+            with st.expander("Onayla", expanded=True):
+                st.warning("Bu işlem geri alınamaz. Tüm verileri silmek istediğinize emin misiniz?")
+                col_yes, col_no = st.columns([1,1])
+                if col_yes.button("Evet, Sil", key="confirm_yes_clear"):
+                    clear_db()
+                    st.session_state.transactions = load_transactions_from_db()
+                    st.session_state.bank_accounts = load_bank_accounts_from_db()
+                    st.success("Veriler temizlendi.")
+                    st.session_state.pop('confirm_clear', None)
+                    st.rerun()
+                if col_no.button("İptal", key="confirm_no_clear"):
+                    st.session_state.pop('confirm_clear', None)
+                    st.info("İşlem iptal edildi.")
+                    st.rerun()
             
     with col2:
         st.info("Tema Ayarı")
