@@ -8,8 +8,8 @@ import os
 import sqlite3
 from typing import List, Dict, Any
 
-# Database file
-DB_PATH = os.path.join(os.path.dirname(__file__), 'findash.db')
+# Database file (env override: set DATABASE_URL in Streamlit Cloud Secrets to point to a persistent DB path or connection string)
+DB_PATH = os.getenv("DATABASE_URL", os.path.join(os.path.dirname(__file__), 'findash.db'))
 
 # Ensure DB file and tables exist early (prevents race conditions during Streamlit reruns)
 _conn = sqlite3.connect(DB_PATH)
@@ -313,14 +313,12 @@ def clear_and_seed_demo_db():
     conn.close()
 
 # Ensure DB initialized and session_state loaded
+# NOTE: Do not auto-seed demo data on first run. Leave DB empty for fresh deploys.
 if 'transactions' not in st.session_state or 'bank_accounts' not in st.session_state:
     init_db()
     trans_df = load_transactions_from_db()
     bank_list = load_bank_accounts_from_db()
-    if trans_df.empty and not bank_list:
-        clear_and_seed_demo_db()
-        trans_df = load_transactions_from_db()
-        bank_list = load_bank_accounts_from_db()
+    # Do not call clear_and_seed_demo_db() automatically — keep DB empty unless the user explicitly seeds it via Settings.
     st.session_state.transactions = trans_df
     st.session_state.bank_accounts = bank_list
 
