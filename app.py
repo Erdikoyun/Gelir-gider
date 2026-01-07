@@ -8,10 +8,10 @@ import os
 import sqlite3
 from typing import List, Dict, Any
 
-# Database file (env override: set DATABASE_URL in Streamlit Cloud Secrets to point to a persistent DB path or connection string)
+# Database file
 DB_PATH = os.getenv("DATABASE_URL", os.path.join(os.path.dirname(__file__), 'findash.db'))
 
-# Ensure DB file and tables exist early (prevents race conditions during Streamlit reruns)
+# Ensure DB file and tables exist early
 _conn = sqlite3.connect(DB_PATH)
 _cur = _conn.cursor()
 _cur.execute(
@@ -27,13 +27,15 @@ _cur.execute(
     )
     """
 )
+# Bank hesapları tablosuna type sütunu ekle
 _cur.execute(
     """
     CREATE TABLE IF NOT EXISTS bank_accounts (
         id TEXT PRIMARY KEY,
         name TEXT,
         balance REAL,
-        currency TEXT
+        currency TEXT,
+        account_type TEXT
     )
     """
 )
@@ -48,20 +50,18 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- STİL VE CSS (Dark/Light uyumlu kart görünümü + Buton Stilleri) ---
+# --- STİL VE CSS ---
 st.markdown("""
 <style>
     .block-container { padding-top: 2rem; }
-    /* Metric card base styles */
     .bank-card {
-        background-color: #e6f3ff; /* light blue like Streamlit info */
+        background-color: #e6f3ff;
         border: 1px solid #c7e6ff;
         padding: 12px;
         border-radius: 10px;
         box-shadow: 0 1px 3px rgba(0,0,0,0.05);
         color: #0f172a;
     }
-
     div[data-testid="stMetric"] {
         background-color: #e6f3ff;
         border: 1px solid #c7e6ff;
@@ -71,21 +71,17 @@ st.markdown("""
         color: #0f172a;
     }
     div[data-testid="stMetric"] * { color: inherit !important; }
-
     [data-theme="dark"] .bank-card {
         background-color: #072033;
         border: 1px solid #12394a;
         color: #e6eef8;
     }
-
     [data-theme="dark"] div[data-testid="stMetric"] {
         background-color: #072033;
         border: 1px solid #12394a;
         color: #e6eef8;
     }
     [data-theme="dark"] div[data-testid="stMetric"] * { color: inherit !important; }
-
-    /* Plotly chart container styling */
     div[data-testid="stPlotlyChart"] > div {
         border-radius: 14px;
         overflow: hidden;
@@ -95,26 +91,12 @@ st.markdown("""
     div[data-testid="stPlotlyChart"] .plotly-graph-div {
         background-color: transparent !important;
     }
-    
-    /* Transaction Type Button Styling Helpers */
-    .btn-income {
-        background-color: #22c55e;
-        color: white;
-        border: none;
-    }
-    .btn-expense {
-        background-color: #ef4444;
-        color: white;
-        border: none;
-    }
 </style>
 """, unsafe_allow_html=True)
 
 # --- YARDIMCI FONKSİYONLAR ---
-# (State yönetiminden önce tanımlanmalıdır)
 
 def get_transaction_categories():
-    """Predefined categories."""
     return ["Maaş", "Kira", "Eğlence", "Alışveriş", "Kıyafet", "Yemek", "Sağlık", "Seyahat"]
 
 def get_db_connection():
@@ -141,7 +123,7 @@ def init_db():
     try:
         cur.execute("ALTER TABLE transactions ADD COLUMN payment_method TEXT")
     except sqlite3.OperationalError:
-        pass # Column likely exists
+        pass
     
     cur.execute(
         """
@@ -149,10 +131,17 @@ def init_db():
             id TEXT PRIMARY KEY,
             name TEXT,
             balance REAL,
-            currency TEXT
+            currency TEXT,
+            account_type TEXT
         )
         """
     )
+    # Banka hesaplarına type sütunu ekle (Migration)
+    try:
+        cur.execute("ALTER TABLE bank_accounts ADD COLUMN account_type TEXT DEFAULT 'Banka'")
+    except sqlite3.OperationalError:
+        pass
+        
     conn.commit()
     conn.close()
 
@@ -170,15 +159,15 @@ def load_bank_accounts_from_db() -> List[Dict[str, Any]]:
     conn.close()
     return [dict(r) for r in rows]
 
-def insert_bank_account_db(acc: dict):
+def insert_account_db(acc: dict):
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("INSERT INTO bank_accounts(id, name, balance, currency) VALUES (?, ?, ?, ?)",
-                (acc['id'], acc['name'], acc['balance'], acc['currency']))
+    cur.execute("INSERT INTO bank_accounts(id, name, balance, currency, account_type) VALUES (?, ?, ?, ?, ?)",
+                (acc['id'], acc['name'], acc['balance'], acc['currency'], acc['account_type']))
     conn.commit()
     conn.close()
 
-def delete_bank_account_db(acc_id: str):
+def delete_account_db(acc_id: str):
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("DELETE FROM bank_accounts WHERE id = ?", (acc_id,))
@@ -200,28 +189,15 @@ def get_transaction_by_id(tx_id: str) -> Dict[str, Any]:
         pass
     return d
 
-def log_debug(msg: str):
-    """Append a debug message to session_state for UI display."""
-    try:
-        if 'debug_log' not in st.session_state:
-            st.session_state['debug_log'] = []
-        st.session_state['debug_log'].append(f"{datetime.datetime.now().isoformat()} - {msg}")
-    except Exception as e:
-        print("log_debug failed:", e)
-
 def update_transaction_db(tx_id: str, t_type: str, amount: float, category: str, date_val, desc: str, payment_method: str):
-    # 1. Eski işlemi bul
     old_tx = get_transaction_by_id(tx_id)
     
-    # 2. Eski işlemin banka bakiyesine etkisini geri al (Reverse)
     if old_tx:
         reverse_type = 'Expense' if old_tx['type'] == 'Income' else 'Income'
-        adjust_bank_balance(old_tx.get('payment_method'), old_tx['amount'], reverse_type)
+        adjust_account_balance(old_tx.get('payment_method'), old_tx['amount'], reverse_type)
 
-    # 3. Yeni işlemin etkisini uygula (Apply New)
-    adjust_bank_balance(payment_method, float(amount), t_type)
+    adjust_account_balance(payment_method, float(amount), t_type)
 
-    # 4. Veritabanındaki işlem kaydını güncelle
     date_iso = pd.to_datetime(date_val).isoformat()
     conn = get_db_connection()
     cur = conn.cursor()
@@ -233,15 +209,12 @@ def update_transaction_db(tx_id: str, t_type: str, amount: float, category: str,
     conn.close()
 
 def delete_transaction_db(tx_id: str):
-    # 1. İşlemi silmeden önce detaylarını al
     tx = get_transaction_by_id(tx_id)
     
     if tx:
-        # 2. Banka bakiyesini düzelt (Reverse Effect)
         reverse_type = 'Expense' if tx['type'] == 'Income' else 'Income'
-        adjust_bank_balance(tx.get('payment_method'), tx['amount'], reverse_type)
+        adjust_account_balance(tx.get('payment_method'), tx['amount'], reverse_type)
 
-        # 3. Kaydı veritabanından sil
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
@@ -256,16 +229,20 @@ def clear_and_seed_demo_db():
     cur.execute("DELETE FROM bank_accounts")
     conn.commit()
 
+    # Seed various account types
     demo_accounts = [
-        {'id': '1', 'name': 'Ziraat Bankası', 'balance': 15400.50, 'currency': 'TRY'},
-        {'id': '2', 'name': 'Garanti BBVA', 'balance': 4200.00, 'currency': 'TRY'},
-        {'id': '3', 'name': 'İş Bankası', 'balance': 250.00, 'currency': 'USD'}
+        {'id': '1', 'name': 'Ziraat Bankası', 'balance': 15400.50, 'currency': 'TRY', 'account_type': 'Banka'},
+        {'id': '2', 'name': 'Garanti BBVA', 'balance': 4200.00, 'currency': 'TRY', 'account_type': 'Banka'},
+        {'id': '3', 'name': 'İş Bankası', 'balance': 250.00, 'currency': 'USD', 'account_type': 'Banka'},
+        {'id': '4', 'name': 'Bonus Kredi Kartı', 'balance': -1200.00, 'currency': 'TRY', 'account_type': 'Kredi Kartı'},
+        {'id': '5', 'name': 'Cüzdan', 'balance': 500.00, 'currency': 'TRY', 'account_type': 'Nakit'},
+        {'id': '6', 'name': 'Sodexo', 'balance': 450.00, 'currency': 'TRY', 'account_type': 'Yemek Kartı'}
     ]
     for a in demo_accounts:
-        cur.execute("INSERT INTO bank_accounts(id, name, balance, currency) VALUES (?, ?, ?, ?)",
-                    (a['id'], a['name'], a['balance'], a['currency']))
+        cur.execute("INSERT INTO bank_accounts(id, name, balance, currency, account_type) VALUES (?, ?, ?, ?, ?)",
+                    (a['id'], a['name'], a['balance'], a['currency'], a['account_type']))
 
-    demo_payment_methods = ['Nakit', 'Kredi Kartı', 'Yemek Kartı', 'Ziraat Bankası', 'Garanti BBVA']
+    demo_payment_methods = ['Cüzdan', 'Bonus Kredi Kartı', 'Sodexo', 'Ziraat Bankası', 'Garanti BBVA']
     demo_categories = ['Maaş', 'Kira', 'Eğlence', 'Alışveriş', 'Kıyafet', 'Yemek', 'Sağlık', 'Seyahat']
     
     today = datetime.date.today()
@@ -292,8 +269,8 @@ def clear_and_seed_demo_db():
                         
     cur.execute("DELETE FROM bank_accounts")
     for a in demo_accounts:
-        cur.execute("INSERT INTO bank_accounts(id, name, balance, currency) VALUES (?, ?, ?, ?)",
-                    (a['id'], a['name'], a['balance'], a['currency']))
+        cur.execute("INSERT INTO bank_accounts(id, name, balance, currency, account_type) VALUES (?, ?, ?, ?, ?)",
+                    (a['id'], a['name'], a['balance'], a['currency'], a['account_type']))
 
     conn.commit()
     conn.close()
@@ -306,7 +283,7 @@ def clear_db():
     conn.commit()
     conn.close()
 
-def get_total_bank_assets():
+def get_total_assets():
     total = 0
     for acc in st.session_state.bank_accounts:
         rate = 30 if acc['currency'] == 'USD' else (33 if acc['currency'] == 'EUR' else 1)
@@ -314,14 +291,13 @@ def get_total_bank_assets():
     return total
 
 def get_payment_methods():
-    """Returns a list of payment methods: Bank accounts + Standard options."""
-    methods = ["Nakit", "Kredi Kartı", "Yemek Kartı", "Diğer"]
+    """Returns a list of payment methods: All accounts from DB."""
     if 'bank_accounts' in st.session_state:
-        methods += [acc['name'] for acc in st.session_state.bank_accounts]
-    return methods
+        return [acc['name'] for acc in st.session_state.bank_accounts]
+    return []
 
-def adjust_bank_balance(payment_method_name, amount, transaction_type):
-    """Adjusts bank balance based on transaction type."""
+def adjust_account_balance(payment_method_name, amount, transaction_type):
+    """Adjusts account balance based on transaction type."""
     accounts = load_bank_accounts_from_db()
     target_acc = None
     
@@ -356,15 +332,57 @@ def add_transaction(t_type, amount, category, date, desc, payment_method):
     conn.commit()
     conn.close()
 
-    adjust_bank_balance(payment_method, amount, t_type)
+    adjust_account_balance(payment_method, amount, t_type)
     st.session_state.transactions = load_transactions_from_db()
 
-# --- STATE YÖNETİMİ (Fonksiyonlar tanımlandığı için burada çağırılabilir) ---
+# --- HESAP YÖNETİMİ SAYFA GÖRÜNÜMÜ FONKSİYONU ---
+def render_account_manager(page_title, account_type):
+    st.subheader(page_title)
+    
+    with st.expander(f"Yeni {page_title} Ekle", expanded=True):
+        with st.form(f"add_{account_type.replace(' ', '_')}_form"):
+            c1, c2, c3 = st.columns(3)
+            with c1: b_name = st.text_input("Hesap Adı")
+            with c2: b_bal = st.number_input("Bakiye", min_value=0.0, value=0.0)
+            with c3: b_curr = st.selectbox("Para Birimi", ["TRY", "USD", "EUR"])
+            
+            if st.form_submit_button("Hesap Ekle"):
+                new_acc = {
+                    'id': str(random.randint(1000,9999)), 
+                    'name': b_name, 
+                    'balance': b_bal, 
+                    'currency': b_curr,
+                    'account_type': account_type
+                }
+                insert_account_db(new_acc)
+                st.session_state.bank_accounts = load_bank_accounts_from_db()
+                st.success("Hesap eklendi!")
+                st.rerun()
+
+    st.markdown(f"### {page_title} Listesi")
+    
+    # Filtrele: Sadece bu sayfanın tipine uygun hesapları göster
+    filtered_accounts = [acc for acc in st.session_state.bank_accounts if acc['account_type'] == account_type]
+    
+    if not filtered_accounts:
+        st.info(f"Kayıtlı {page_title} bulunamadı.")
+    else:
+        for acc in filtered_accounts:
+            col_info, col_del = st.columns([4, 1])
+            with col_info:
+                st.markdown(f"<div class='bank-card'>💳 <strong>{acc['name']}</strong> - {acc['balance']:,.2f} {acc['currency']}</div>", unsafe_allow_html=True)
+            with col_del:
+                if st.button("Sil", key=f"del_{acc['id']}"):
+                    delete_account_db(acc['id'])
+                    st.session_state.bank_accounts = load_bank_accounts_from_db()
+                    st.success("Hesap silindi!")
+                    st.rerun()
+
+# --- STATE YÖNETİMİ ---
 if 'transactions' not in st.session_state or 'bank_accounts' not in st.session_state:
     init_db()
     trans_df = load_transactions_from_db()
     bank_list = load_bank_accounts_from_db()
-    # Do not call clear_and_seed_demo_db() automatically — keep DB empty unless the user explicitly seeds it via Settings.
     st.session_state.transactions = trans_df
     st.session_state.bank_accounts = bank_list
 
@@ -372,7 +390,15 @@ if 'transactions' not in st.session_state or 'bank_accounts' not in st.session_s
 with st.sidebar:
     st.title("Erdi K. 🤖")
     st.markdown("---")
-    page = st.radio("Menü", ["Dashboard", "İşlem Ekle", "Banka Hesapları", "Ayarlar"])
+    page = st.radio("Menü", [
+        "Dashboard", 
+        "İşlem Ekle", 
+        "Banka Hesapları",
+        "Kredi Kartları",
+        "Nakit Paralar",
+        "Yemek Kartları",
+        "Ayarlar"
+    ])
     st.markdown("---")
 
 # --- PAGE: DASHBOARD ---
@@ -395,22 +421,19 @@ if page == "Dashboard":
     total_income = filtered_df[filtered_df['type'] == 'Income']['amount'].sum()
     total_expense = filtered_df[filtered_df['type'] == 'Expense']['amount'].sum()
     
-    bank_assets = get_total_bank_assets()
+    # Banka dahil TÜM varlıklar
+    assets = get_total_assets()
     
     bank_names = [acc['name'] for acc in st.session_state.bank_accounts]
     
-    if not df.empty:
-        non_bank_tx = df[~df['payment_method'].isin(bank_names)]
-        cash_income = non_bank_tx[non_bank_tx['type'] == 'Income']['amount'].sum()
-        cash_expense = non_bank_tx[non_bank_tx['type'] == 'Expense']['amount'].sum()
-        cash_assets = cash_income - cash_expense
-    else:
-        cash_assets = 0
-        
-    net_worth = bank_assets + cash_assets
+    # Net Worth hesaplama
+    # Eğer bakiyeler otomatik güncelleniyorsa (güncelledik), aslında "Toplam Varlık" = get_total_assets().
+    # Ancak "Toplam Varlık (Net)" kurgusu önceki koddaydı.
+    # Artık her şey bir "Hesap" olduğu için, tüm hesapların toplamı Net Varlıktır.
+    net_worth = assets
 
     c1, c2, c3 = st.columns([1, 1, 1])
-    c1.metric("Toplam Varlık (Net)", f"₺{net_worth:,.2f}", f"Banka: ₺{bank_assets:,.2f}", delta_color="normal")
+    c1.metric("Toplam Varlık (Net)", f"₺{net_worth:,.2f}", "Tüm Hesaplar", delta_color="normal")
     c2.metric(f"{selected_month} Gelir", f"₺{total_income:,.2f}", f"+₺{total_income:,.2f}")
     c3.metric(f"{selected_month} Gider", f"₺{total_expense:,.2f}", f"-₺{total_expense:,.2f}", delta_color="inverse")
 
@@ -461,27 +484,25 @@ if page == "Dashboard":
         bank_df = pd.DataFrame(st.session_state.bank_accounts)
         if not bank_df.empty:
             bank_df['TRY_Value'] = bank_df.apply(lambda x: x['balance'] * 30 if x['currency'] == 'USD' else x['balance'], axis=1)
-            fig = px.pie(bank_df, names='name', values='TRY_Value', title='Banka Varlıkları Dağılımı', hole=0.5, color_discrete_sequence=px.colors.sequential.Plasma)
+            fig = px.pie(bank_df, names='name', values='TRY_Value', title='Tüm Varlıklar Dağılımı', hole=0.5, color_discrete_sequence=px.colors.sequential.Plasma)
             fig.update_traces(textfont=dict(size=14, color='white'))
             fig.update_layout(paper_bgcolor='#803811', plot_bgcolor='#803811', font=dict(color='white', size=14), title=dict(font=dict(size=16)), margin=dict(l=6,r=6,t=30,b=6))
             st.plotly_chart(fig, width='stretch', height=300)
 
-# --- PAGE: İŞLEM EKLE (GÜNCELLENMİŞ ARAYÜZ) ---
+# --- PAGE: İŞLEM EKLE ---
 elif page == "İşlem Ekle":
     st.subheader("Yeni Gelir veya Gider Ekle")
     
-    # --- TÜR SEÇİMİ (BUTONLAR) ---
-    # State initialization for transaction type selection
     if 'tx_type_selection' not in st.session_state:
         st.session_state.tx_type_selection = 'Income'
 
-    # Check if editing mode to sync buttons
     editing_tx = st.session_state.get('editing_tx')
     if editing_tx:
         tx = get_transaction_by_id(editing_tx)
         if tx:
             st.session_state.tx_type_selection = tx['type']
 
+    # TÜR SEÇİMİ
     col_type1, col_type2 = st.columns(2)
     with col_type1:
         if st.button("📉 GİDER", use_container_width=True, key="btn_expense_select"):
@@ -493,7 +514,6 @@ elif page == "İşlem Ekle":
             st.session_state.tx_type_selection = 'Income'
             st.rerun()
 
-    # Visual Feedback Box for Selection
     sel_type = st.session_state.tx_type_selection
     if sel_type == 'Income':
         st.success(f"**Seçilen:** :green[+ GELİR]", icon="🟢")
@@ -502,7 +522,7 @@ elif page == "İşlem Ekle":
     
     st.markdown("---")
 
-    # --- DÜZENLEME FORMU ---
+    # DÜZENLEME
     if editing_tx:
         tx = get_transaction_by_id(editing_tx)
         if not tx:
@@ -510,25 +530,20 @@ elif page == "İşlem Ekle":
             st.session_state.pop('editing_tx', None)
         else:
             with st.form("edit_transaction_form"):
-                # Type comes from session state buttons above
                 t_type = st.session_state.tx_type_selection 
-                
-                # Other fields
                 col1, col2 = st.columns(2)
                 with col1:
                     amount = st.number_input("Tutar", min_value=0.01, value=float(tx['amount']), format="%.2f")
                 with col2:
                     date = st.date_input("Tarih", pd.to_datetime(tx['date']).date())
                 
-                # Payment Method
                 payment_methods = get_payment_methods()
-                current_pm = tx.get('payment_method', 'Nakit')
+                current_pm = tx.get('payment_method')
                 if current_pm not in payment_methods:
                     payment_methods.append(current_pm)
                 
                 payment_method = st.selectbox("Ödeme Yöntemi / Kaynak", payment_methods, index=payment_methods.index(current_pm))
                 
-                # Category (Selectbox from list)
                 categories = get_transaction_categories()
                 category = st.selectbox("Kategori", categories, index=categories.index(tx['category']) if tx['category'] in categories else 0)
 
@@ -540,7 +555,7 @@ elif page == "İşlem Ekle":
                         try:
                             update_transaction_db(editing_tx, t_type, amount, category, date, desc, payment_method)
                             st.session_state.transactions = load_transactions_from_db()
-                            st.success("İşlem ve banka bakiyesi güncellendi!")
+                            st.success("İşlem ve bakiye güncellendi!")
                             st.session_state.pop('editing_tx', None)
                             st.rerun()
                         except Exception as e:
@@ -550,12 +565,10 @@ elif page == "İşlem Ekle":
                         st.session_state.pop('editing_tx', None)
                         st.rerun()
 
-    # --- YENİ İŞLEM EKLEME FORMU ---
+    # YENİ EKLEME
     if not st.session_state.get('editing_tx'):
         with st.form("transaction_form"):
-            # Type comes from session state buttons
             t_type = st.session_state.tx_type_selection
-            
             col1, col2 = st.columns(2)
             with col1:
                 amount = st.number_input("Tutar", min_value=0.01, format="%.2f")
@@ -565,12 +578,10 @@ elif page == "İşlem Ekle":
             payment_methods = get_payment_methods()
             payment_method = st.selectbox("Ödeme Yöntemi / Kaynak", payment_methods, index=0)
             
-            # Category Selection from List
             categories = get_transaction_categories()
-            # Default based on type: 'Maaş' for Income, 'Alışveriş' for Expense (heuristic)
-            default_idx = 0 # Maaş
+            default_idx = 0 
             if t_type == 'Expense':
-                default_idx = 3 # Alışveriş
+                default_idx = 3
             
             category = st.selectbox("Kategori", categories, index=default_idx)
 
@@ -579,19 +590,11 @@ elif page == "İşlem Ekle":
 
             if submitted:
                 add_transaction(t_type, amount, category, date, desc, payment_method)
-                is_bank = False
-                for acc in st.session_state.bank_accounts:
-                    if acc['name'] == payment_method:
-                        is_bank = True
-                        break
-                if is_bank:
-                    st.success(f"İşlem eklendi ve {payment_method} bakiyesi güncellendi!")
-                else:
-                    st.success("İşlem başarıyla eklendi!")
+                st.success("İşlem başarıyla eklendi!")
 
     st.markdown("---")
 
-    # --- LİSTELEME ---
+    # LİSTELEME
     st.markdown("### Mevcut İşlemler")
     tx_df = st.session_state.transactions.sort_values('date', ascending=False).reset_index(drop=True)
 
@@ -631,23 +634,18 @@ elif page == "İşlem Ekle":
                 st.rerun()
 
     tx_filtered = tx_df.copy()
-    # Type filter
     tf_type = st.session_state.get('tx_filter_type')
     if tf_type and tf_type != 'Tümü':
-        # Mapping Turkish UI back to DB values
         db_type = 'Income' if tf_type == 'Gelir' else 'Expense'
         tx_filtered = tx_filtered[tx_filtered['type'] == db_type]
-    # Date filter
     try:
         min_d = pd.to_datetime(st.session_state['tx_filter_min_date'])
         max_d = pd.to_datetime(st.session_state['tx_filter_max_date'])
         tx_filtered = tx_filtered[(tx_filtered['date'] >= min_d) & (tx_filtered['date'] <= max_d)]
     except Exception:
         pass
-    # Category filter
     if st.session_state.get('tx_filter_cat') and st.session_state['tx_filter_cat'] != 'Tümü':
         tx_filtered = tx_filtered[tx_filtered['category'] == st.session_state['tx_filter_cat']]
-    # Search
     q = st.session_state.get('tx_filter_search','').strip().lower()
     if q:
         tx_filtered = tx_filtered[tx_filtered['category'].fillna('').str.lower().str.contains(q) | 
@@ -672,7 +670,6 @@ elif page == "İşlem Ekle":
             date_str = pd.to_datetime(row['date']).date()
             c1.markdown(f"<div style='font-size:14px; font-weight:600; font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;'>{date_str}</div>", unsafe_allow_html=True)
             
-            # Translate Type to Turkish for display
             display_type = "GELİR" if row['type'] == 'Income' else "GİDER"
             c2.markdown(f"<span style='color: {'#22c55e' if row['type'] == 'Income' else '#ef4444'}; font-weight:bold;'>{display_type}</span>", unsafe_allow_html=True)
             
@@ -710,40 +707,15 @@ elif page == "İşlem Ekle":
                         st.rerun()
             st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid rgba(0,0,0,0.1);'/>", unsafe_allow_html=True)
 
-# --- SAYFA: BANKA HESAPLARI ---
+# --- SAYFALAR: BANKA, KREDİ KARTI, NAKİT, YEMEK KARTI ---
 elif page == "Banka Hesapları":
-    st.subheader("Banka Hesaplarım")
-    
-    with st.expander("Yeni Hesap Ekle", expanded=True):
-        with st.form("add_bank"):
-            c1, c2, c3 = st.columns(3)
-            with c1: b_name = st.text_input("Banka Adı")
-            with c2: b_bal = st.number_input("Bakiye", min_value=0.0)
-            with c3: b_curr = st.selectbox("Para Birimi", ["TRY", "USD", "EUR"])
-            
-            if st.form_submit_button("Hesap Ekle"):
-                new_acc = {
-                    'id': str(random.randint(1000,9999)), 
-                    'name': b_name, 
-                    'balance': b_bal, 
-                    'currency': b_curr
-                }
-                insert_bank_account_db(new_acc)
-                st.session_state.bank_accounts = load_bank_accounts_from_db()
-                st.success("Hesap eklendi!")
-                st.rerun()
-
-    st.markdown("### Hesap Listesi")
-    for i, acc in enumerate(st.session_state.bank_accounts):
-        col_info, col_del = st.columns([4, 1])
-        with col_info:
-            st.markdown(f"<div class='bank-card'>🏦 <strong>{acc['name']}</strong> - {acc['balance']:,.2f} {acc['currency']}</div>", unsafe_allow_html=True)
-        with col_del:
-            if st.button("Sil", key=f"del_{acc['id']}"):
-                delete_bank_account_db(acc['id'])
-                st.session_state.bank_accounts = load_bank_accounts_from_db()
-                st.success("Hesap silindi!")
-                st.rerun()
+    render_account_manager("Banka Hesaplarım", "Banka")
+elif page == "Kredi Kartları":
+    render_account_manager("Kredi Kartlarım", "Kredi Kartı")
+elif page == "Nakit Paralar":
+    render_account_manager("Nakit Paralarım", "Nakit")
+elif page == "Yemek Kartları":
+    render_account_manager("Yemek Kartlarım", "Yemek Kartı")
 
 # --- SAYFA: AYARLAR ---
 elif page == "Ayarlar":
@@ -781,12 +753,12 @@ elif page == "Ayarlar":
                 tx = load_transactions_from_db()
                 ba = load_bank_accounts_from_db()
                 st.write(f"Toplam İşlem (DB): {len(tx)}")
-                st.write(f"Toplam Banka Hesabı (DB): {len(ba)}")
+                st.write(f"Toplam Hesap (DB): {len(ba)}")
                 if not tx.empty:
                     st.write("Son 5 işlem:")
                     st.dataframe(tx.head(5))
                 if ba:
-                    st.write("Banka Hesapları (DB):")
+                    st.write("Tüm Hesaplar (DB):")
                     st.json(ba)
             except Exception as e:
                 st.error(f"DB okunamadı: {e}")
