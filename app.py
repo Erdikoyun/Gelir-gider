@@ -22,7 +22,8 @@ _cur.execute(
         type TEXT,
         category TEXT,
         amount REAL,
-        description TEXT
+        description TEXT,
+        payment_method TEXT
     )
     """
 )
@@ -47,12 +48,11 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- STİL VE CSS (Dark/Light uyumlu kart görünümü) ---
+# --- STİL VE CSS (Dark/Light uyumlu kart görünümü + Buton Stilleri) ---
 st.markdown("""
 <style>
     .block-container { padding-top: 2rem; }
     /* Metric card base styles */
-    /* Shared bank-card style for bank list and metrics */
     .bank-card {
         background-color: #e6f3ff; /* light blue like Streamlit info */
         border: 1px solid #c7e6ff;
@@ -68,9 +68,8 @@ st.markdown("""
         padding: 15px;
         border-radius: 10px;
         box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-        color: #0f172a; /* ensure readable text in light mode */
+        color: #0f172a;
     }
-    /* Make sure child elements inherit the color */
     div[data-testid="stMetric"] * { color: inherit !important; }
 
     [data-theme="dark"] .bank-card {
@@ -82,61 +81,48 @@ st.markdown("""
     [data-theme="dark"] div[data-testid="stMetric"] {
         background-color: #072033;
         border: 1px solid #12394a;
-        color: #e6eef8; /* light text for dark mode */
+        color: #e6eef8;
     }
     [data-theme="dark"] div[data-testid="stMetric"] * { color: inherit !important; }
 
-    /* Plotly chart container styling: rounded corners and shared background */
+    /* Plotly chart container styling */
     div[data-testid="stPlotlyChart"] > div {
-        border-radius: 14px; /* rounded corners */
-        overflow: hidden; /* clip inner plot so corners are rounded */
-        background-color: #803811; /* chart background color */
+        border-radius: 14px;
+        overflow: hidden;
+        background-color: #803811;
         box-shadow: 0 1px 3px rgba(0,0,0,0.08);
     }
-    /* Ensure the inner plot area is transparent so the container color shows through */
     div[data-testid="stPlotlyChart"] .plotly-graph-div {
         background-color: transparent !important;
+    }
+    
+    /* Transaction Type Button Styling Helpers */
+    .btn-income {
+        background-color: #22c55e;
+        color: white;
+        border: none;
+    }
+    .btn-expense {
+        background-color: #ef4444;
+        color: white;
+        border: none;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# --- STATE YÖNETİMİ (Veri depolama: SQLite DB) ---
-# Session state will be populated from the SQLite database during initialization.
-
-
 # --- YARDIMCI FONKSİYONLAR ---
-def get_total_bank_assets():
-    total = 0
-    for acc in st.session_state.bank_accounts:
-        rate = 30 if acc['currency'] == 'USD' else (33 if acc['currency'] == 'EUR' else 1)
-        total += acc['balance'] * rate
-    return total
+# (State yönetiminden önce tanımlanmalıdır)
 
-def add_transaction(t_type, amount, category, date, desc):
-    new_id = str(random.randint(10000, 99999))
-    date_iso = pd.to_datetime(date).isoformat()
-    # insert into DB
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO transactions(id, date, type, category, amount, description) VALUES (?, ?, ?, ?, ?, ?)",
-        (new_id, date_iso, t_type, category, amount, desc)
-    )
-    conn.commit()
-    conn.close()
-
-    # update session state by reloading from DB for simplicity
-    st.session_state.transactions = load_transactions_from_db()
-
+def get_transaction_categories():
+    """Predefined categories."""
+    return ["Maaş", "Kira", "Eğlence", "Alışveriş", "Kıyafet", "Yemek", "Sağlık", "Seyahat"]
 
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
-
 def init_db():
-    """Create DB and tables if not exist."""
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
@@ -147,10 +133,16 @@ def init_db():
             type TEXT,
             category TEXT,
             amount REAL,
-            description TEXT
+            description TEXT,
+            payment_method TEXT
         )
         """
     )
+    try:
+        cur.execute("ALTER TABLE transactions ADD COLUMN payment_method TEXT")
+    except sqlite3.OperationalError:
+        pass # Column likely exists
+    
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS bank_accounts (
@@ -164,13 +156,11 @@ def init_db():
     conn.commit()
     conn.close()
 
-
 def load_transactions_from_db():
     conn = get_db_connection()
     df = pd.read_sql_query("SELECT * FROM transactions ORDER BY date DESC", conn, parse_dates=['date'])
     conn.close()
     return df
-
 
 def load_bank_accounts_from_db() -> List[Dict[str, Any]]:
     conn = get_db_connection()
@@ -180,7 +170,6 @@ def load_bank_accounts_from_db() -> List[Dict[str, Any]]:
     conn.close()
     return [dict(r) for r in rows]
 
-
 def insert_bank_account_db(acc: dict):
     conn = get_db_connection()
     cur = conn.cursor()
@@ -189,14 +178,12 @@ def insert_bank_account_db(acc: dict):
     conn.commit()
     conn.close()
 
-
 def delete_bank_account_db(acc_id: str):
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("DELETE FROM bank_accounts WHERE id = ?", (acc_id,))
     conn.commit()
     conn.close()
-
 
 def get_transaction_by_id(tx_id: str) -> Dict[str, Any]:
     conn = get_db_connection()
@@ -205,17 +192,13 @@ def get_transaction_by_id(tx_id: str) -> Dict[str, Any]:
     row = cur.fetchone()
     conn.close()
     if not row:
-        print(f"get_transaction_by_id: not found {tx_id}")
         return None
     d = dict(row)
-    # parse date
     try:
         d['date'] = pd.to_datetime(d['date'])
     except Exception:
         pass
-    print(f"get_transaction_by_id: found {d['id']}")
     return d
-
 
 def log_debug(msg: str):
     """Append a debug message to session_state for UI display."""
@@ -226,60 +209,53 @@ def log_debug(msg: str):
     except Exception as e:
         print("log_debug failed:", e)
 
+def update_transaction_db(tx_id: str, t_type: str, amount: float, category: str, date_val, desc: str, payment_method: str):
+    # 1. Eski işlemi bul
+    old_tx = get_transaction_by_id(tx_id)
+    
+    # 2. Eski işlemin banka bakiyesine etkisini geri al (Reverse)
+    if old_tx:
+        reverse_type = 'Expense' if old_tx['type'] == 'Income' else 'Income'
+        adjust_bank_balance(old_tx.get('payment_method'), old_tx['amount'], reverse_type)
 
-def update_transaction_db(tx_id: str, t_type: str, amount: float, category: str, date_val, desc: str):
+    # 3. Yeni işlemin etkisini uygula (Apply New)
+    adjust_bank_balance(payment_method, float(amount), t_type)
+
+    # 4. Veritabanındaki işlem kaydını güncelle
     date_iso = pd.to_datetime(date_val).isoformat()
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE transactions SET date = ?, type = ?, category = ?, amount = ?, description = ? WHERE id = ?",
-        (date_iso, t_type, category, float(amount), desc, tx_id)
+        "UPDATE transactions SET date = ?, type = ?, category = ?, amount = ?, description = ?, payment_method = ? WHERE id = ?",
+        (date_iso, t_type, category, float(amount), desc, payment_method, tx_id)
     )
     conn.commit()
     conn.close()
 
-
 def delete_transaction_db(tx_id: str):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
-    conn.commit()
-    conn.close()
+    # 1. İşlemi silmeden önce detaylarını al
+    tx = get_transaction_by_id(tx_id)
+    
+    if tx:
+        # 2. Banka bakiyesini düzelt (Reverse Effect)
+        reverse_type = 'Expense' if tx['type'] == 'Income' else 'Income'
+        adjust_bank_balance(tx.get('payment_method'), tx['amount'], reverse_type)
 
+        # 3. Kaydı veritabanından sil
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
+        conn.commit()
+        conn.close()
 
 def clear_and_seed_demo_db():
-    # ensure tables exist, then remove existing data and seed the demo dataset
     init_db()
     conn = get_db_connection()
     cur = conn.cursor()
-    # As a safeguard, create tables if missing
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS transactions (
-            id TEXT PRIMARY KEY,
-            date TEXT,
-            type TEXT,
-            category TEXT,
-            amount REAL,
-            description TEXT
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS bank_accounts (
-            id TEXT PRIMARY KEY,
-            name TEXT,
-            balance REAL,
-            currency TEXT
-        )
-        """
-    )
     cur.execute("DELETE FROM transactions")
     cur.execute("DELETE FROM bank_accounts")
     conn.commit()
 
-    # seed bank accounts
     demo_accounts = [
         {'id': '1', 'name': 'Ziraat Bankası', 'balance': 15400.50, 'currency': 'TRY'},
         {'id': '2', 'name': 'Garanti BBVA', 'balance': 4200.00, 'currency': 'TRY'},
@@ -289,11 +265,9 @@ def clear_and_seed_demo_db():
         cur.execute("INSERT INTO bank_accounts(id, name, balance, currency) VALUES (?, ?, ?, ?)",
                     (a['id'], a['name'], a['balance'], a['currency']))
 
-    # seed transactions (last 60 days)
-    categories = {
-        'Income': ['Maaş', 'Freelance', 'Yatırım', 'Hediye'],
-        'Expense': ['Gıda', 'Kira', 'Faturalar', 'Eğlence', 'Ulaşım', 'Alışveriş', 'Sağlık']
-    }
+    demo_payment_methods = ['Nakit', 'Kredi Kartı', 'Yemek Kartı', 'Ziraat Bankası', 'Garanti BBVA']
+    demo_categories = ['Maaş', 'Kira', 'Eğlence', 'Alışveriş', 'Kıyafet', 'Yemek', 'Sağlık', 'Seyahat']
+    
     today = datetime.date.today()
     for i in range(60):
         date = today - datetime.timedelta(days=i)
@@ -301,20 +275,30 @@ def clear_and_seed_demo_db():
         for _ in range(daily_count):
             is_income = random.random() > 0.7
             t_type = 'Income' if is_income else 'Expense'
-            cat_list = categories['Income'] if is_income else categories['Expense']
-            category = random.choice(cat_list)
+            category = random.choice(demo_categories) if not is_income else "Maaş" 
             amount = random.uniform(500, 2500) if is_income else random.uniform(50, 400)
+            p_method = random.choice(demo_payment_methods)
             cur.execute(
-                "INSERT INTO transactions(id, date, type, category, amount, description) VALUES (?, ?, ?, ?, ?, ?)",
-                (str(random.randint(10000, 99999)), pd.to_datetime(date).isoformat(), t_type, category, round(amount, 2), f"Demo {t_type}")
+                "INSERT INTO transactions(id, date, type, category, amount, description, payment_method) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (str(random.randint(10000, 99999)), pd.to_datetime(date).isoformat(), t_type, category, round(amount, 2), f"Demo {t_type}", p_method)
             )
+            
+            if p_method in [acc['name'] for acc in demo_accounts]:
+                target_name = p_method
+                multiplier = 1 if t_type == 'Income' else -1
+                for acc in demo_accounts:
+                    if acc['name'] == target_name:
+                        acc['balance'] += amount * multiplier
+                        
+    cur.execute("DELETE FROM bank_accounts")
+    for a in demo_accounts:
+        cur.execute("INSERT INTO bank_accounts(id, name, balance, currency) VALUES (?, ?, ?, ?)",
+                    (a['id'], a['name'], a['balance'], a['currency']))
 
     conn.commit()
     conn.close()
 
-
 def clear_db():
-    """Remove all rows from transactions and bank_accounts (no demo seed)."""
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("DELETE FROM transactions")
@@ -322,8 +306,60 @@ def clear_db():
     conn.commit()
     conn.close()
 
-# Ensure DB initialized and session_state loaded
-# NOTE: Do not auto-seed demo data on first run. Leave DB empty for fresh deploys.
+def get_total_bank_assets():
+    total = 0
+    for acc in st.session_state.bank_accounts:
+        rate = 30 if acc['currency'] == 'USD' else (33 if acc['currency'] == 'EUR' else 1)
+        total += acc['balance'] * rate
+    return total
+
+def get_payment_methods():
+    """Returns a list of payment methods: Bank accounts + Standard options."""
+    methods = ["Nakit", "Kredi Kartı", "Yemek Kartı", "Diğer"]
+    if 'bank_accounts' in st.session_state:
+        methods += [acc['name'] for acc in st.session_state.bank_accounts]
+    return methods
+
+def adjust_bank_balance(payment_method_name, amount, transaction_type):
+    """Adjusts bank balance based on transaction type."""
+    accounts = load_bank_accounts_from_db()
+    target_acc = None
+    
+    for acc in accounts:
+        if acc['name'] == payment_method_name:
+            target_acc = acc
+            break
+    
+    if target_acc:
+        multiplier = 1 if transaction_type == 'Income' else -1
+        new_balance = target_acc['balance'] + (amount * multiplier)
+        
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("UPDATE bank_accounts SET balance = ? WHERE id = ?", (new_balance, target_acc['id']))
+        conn.commit()
+        conn.close()
+        
+        st.session_state.bank_accounts = load_bank_accounts_from_db()
+        return True
+    return False
+
+def add_transaction(t_type, amount, category, date, desc, payment_method):
+    new_id = str(random.randint(10000, 99999))
+    date_iso = pd.to_datetime(date).isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO transactions(id, date, type, category, amount, description, payment_method) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (new_id, date_iso, t_type, category, amount, desc, payment_method)
+    )
+    conn.commit()
+    conn.close()
+
+    adjust_bank_balance(payment_method, amount, t_type)
+    st.session_state.transactions = load_transactions_from_db()
+
+# --- STATE YÖNETİMİ (Fonksiyonlar tanımlandığı için burada çağırılabilir) ---
 if 'transactions' not in st.session_state or 'bank_accounts' not in st.session_state:
     init_db()
     trans_df = load_transactions_from_db()
@@ -332,71 +368,65 @@ if 'transactions' not in st.session_state or 'bank_accounts' not in st.session_s
     st.session_state.transactions = trans_df
     st.session_state.bank_accounts = bank_list
 
-
-
-# --- SIDEBAR NAVİGASYON ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.title("Erdi K. 🤖")
     st.markdown("---")
     page = st.radio("Menü", ["Dashboard", "İşlem Ekle", "Banka Hesapları", "Ayarlar"])
     st.markdown("---")
-    
 
-
-# --- SAYFA: DASHBOARD ---
+# --- PAGE: DASHBOARD ---
 if page == "Dashboard":
     st.subheader("Finansal Genel Bakış")
-    
     df = st.session_state.transactions
     
-    # Tarih Filtresi
     col_filter1, col_filter2 = st.columns([3, 1])
     with col_filter1:
-        selected_month = st.selectbox("Dönem Seçiniz", ["Tüm Zamanlar"] + sorted(list(set(df['date'].dt.strftime('%Y-%m'))), reverse=True))
+        months = ["Tüm Zamanlar"]
+        if not df.empty:
+            months += sorted(list(set(df['date'].dt.strftime('%Y-%m'))), reverse=True)
+        selected_month = st.selectbox("Dönem Seçiniz", months)
     
-    # Veriyi Filtrele
     if selected_month != "Tüm Zamanlar":
         filtered_df = df[df['date'].dt.strftime('%Y-%m') == selected_month]
     else:
         filtered_df = df
 
-    # Hesaplamalar
     total_income = filtered_df[filtered_df['type'] == 'Income']['amount'].sum()
     total_expense = filtered_df[filtered_df['type'] == 'Expense']['amount'].sum()
-    cash_flow = total_income - total_expense
+    
     bank_assets = get_total_bank_assets()
-    net_worth = bank_assets + cash_flow
+    
+    bank_names = [acc['name'] for acc in st.session_state.bank_accounts]
+    
+    if not df.empty:
+        non_bank_tx = df[~df['payment_method'].isin(bank_names)]
+        cash_income = non_bank_tx[non_bank_tx['type'] == 'Income']['amount'].sum()
+        cash_expense = non_bank_tx[non_bank_tx['type'] == 'Expense']['amount'].sum()
+        cash_assets = cash_income - cash_expense
+    else:
+        cash_assets = 0
+        
+    net_worth = bank_assets + cash_assets
 
-    # Üst Kartlar (Metrics)
-    # Use explicit equal ratios and match vertical spacing by adding a delta to the first metric
     c1, c2, c3 = st.columns([1, 1, 1])
-    c1.metric("Toplam Varlık (Net + Banka)", f"₺{net_worth:,.2f}", f"Banka: ₺{bank_assets:,.2f}", delta_color="normal")
-    c2.metric("Toplam Gelir", f"₺{total_income:,.2f}", f"+₺{total_income:,.2f}")
-    c3.metric("Toplam Gider", f"₺{total_expense:,.2f}", f"-₺{total_expense:,.2f}", delta_color="inverse")
-
-
+    c1.metric("Toplam Varlık (Net)", f"₺{net_worth:,.2f}", f"Banka: ₺{bank_assets:,.2f}", delta_color="normal")
+    c2.metric(f"{selected_month} Gelir", f"₺{total_income:,.2f}", f"+₺{total_income:,.2f}")
+    c3.metric(f"{selected_month} Gider", f"₺{total_expense:,.2f}", f"-₺{total_expense:,.2f}", delta_color="inverse")
 
     st.markdown("---")
 
-    # 2x3 Grafik Düzeni (2 rows x 3 cols)
     row1 = st.columns(3)
     row2 = st.columns(3)
-
-    # Renk Paleti
     colors = px.colors.qualitative.Pastel
 
-    # 1. Gelir vs Gider (Pie)
     with row1[0]:
-        pie_data = pd.DataFrame({
-            'Label': ['Gelir', 'Gider'], 
-            'Value': [total_income, total_expense]
-        })
+        pie_data = pd.DataFrame({'Label': ['Gelir', 'Gider'], 'Value': [total_income, total_expense]})
         fig = px.pie(pie_data, names='Label', values='Value', title='Gelir vs Gider', hole=0.0, color_discrete_sequence=['#22c55e', '#ef4444'])
         fig.update_traces(textfont=dict(size=14, color='white'), marker=dict(line=dict(color='#803811', width=0)))
         fig.update_layout(paper_bgcolor='#803811', plot_bgcolor='#803811', font=dict(color='white', size=14), title=dict(font=dict(size=16)), margin=dict(l=6,r=6,t=30,b=6))
         st.plotly_chart(fig, width='stretch', height=300)
 
-    # 2. Gider Kategorileri (Donut)
     with row1[1]:
         exp_cat = filtered_df[filtered_df['type'] == 'Expense'].groupby('category')['amount'].sum().reset_index()
         fig = px.pie(exp_cat, names='category', values='amount', title='Gider Kategorileri', hole=0.5, color_discrete_sequence=colors)
@@ -404,19 +434,6 @@ if page == "Dashboard":
         fig.update_layout(paper_bgcolor='#803811', plot_bgcolor='#803811', font=dict(color='white', size=14), title=dict(font=dict(size=16)), margin=dict(l=6,r=6,t=30,b=6))
         st.plotly_chart(fig, width='stretch', height=300)
 
-    # 3. Bakiye Geçmişi (Line) - kaldırıldı
-    # (Nakit Akış Trendi grafiği kaldırıldı)
-
-
-    # 4. Gelir Trendi (Line) - kaldırıldı
-    # (Günlük Gelir Trendi grafiği kaldırıldı)
-
-
-    # 5. Gider Trendi (Line) - kaldırıldı
-    # (Günlük Gider Trendi grafiği kaldırıldı)
-
-
-    # 6. Tasarruf Oranı (Donut)
     with row1[2]:
         savings = max(0, total_income - total_expense)
         sav_data = pd.DataFrame({'Label': ['Tasarruf', 'Harcama'], 'Value': [savings, total_expense]})
@@ -425,17 +442,14 @@ if page == "Dashboard":
         fig.update_layout(paper_bgcolor='#803811', plot_bgcolor='#803811', font=dict(color='white', size=14), title=dict(font=dict(size=16)), margin=dict(l=6,r=6,t=30,b=6))
         st.plotly_chart(fig, width='stretch', height=300)
 
-    # 7. İşlem Hacmi (Pie)
     with row2[0]:
-        # value_counts().reset_index() returns columns ['index', 0] so name the columns explicitly
         counts = filtered_df['type'].value_counts().reset_index(name='count')
         counts.columns = ['type', 'count']
-        fig = px.pie(counts, names='type', values='count', title='İşlem Adetleri', color_discrete_sequence=['#ef4444', '#22c55e']) # exp first usually
+        fig = px.pie(counts, names='type', values='count', title='İşlem Adetleri', color_discrete_sequence=['#ef4444', '#22c55e'])
         fig.update_traces(textfont=dict(size=14, color='white'))
         fig.update_layout(paper_bgcolor='#803811', plot_bgcolor='#803811', font=dict(color='white', size=14), title=dict(font=dict(size=16)), margin=dict(l=6,r=6,t=30,b=6))
         st.plotly_chart(fig, width='stretch', height=300)
 
-    # 8. Top Harcamalar (Bar/Donut alternatifi olarak Donut)
     with row2[1]:
         top_exp = filtered_df[filtered_df['type'] == 'Expense'].nlargest(5, 'amount')
         fig = px.pie(top_exp, names='category', values='amount', title='En Büyük 5 Harcama', hole=0.4)
@@ -443,82 +457,145 @@ if page == "Dashboard":
         fig.update_layout(paper_bgcolor='#803811', plot_bgcolor='#803811', font=dict(color='white', size=14), title=dict(font=dict(size=16)), margin=dict(l=6,r=6,t=30,b=6))
         st.plotly_chart(fig, width='stretch', height=300)
 
-    # 9. Banka Varlıkları (Doughnut)
     with row2[2]:
         bank_df = pd.DataFrame(st.session_state.bank_accounts)
-        # Basit bir çevrim (Görselleştirme için TRY bazlı)
-        bank_df['TRY_Value'] = bank_df.apply(lambda x: x['balance'] * 30 if x['currency'] == 'USD' else x['balance'], axis=1)
-        fig = px.pie(bank_df, names='name', values='TRY_Value', title='Banka Varlıkları Dağılımı', hole=0.5, color_discrete_sequence=px.colors.sequential.Plasma)
-        fig.update_traces(textfont=dict(size=14, color='white'))
-        fig.update_layout(paper_bgcolor='#803811', plot_bgcolor='#803811', font=dict(color='white', size=14), title=dict(font=dict(size=16)), margin=dict(l=6,r=6,t=30,b=6))
-        st.plotly_chart(fig, width='stretch', height=300)
+        if not bank_df.empty:
+            bank_df['TRY_Value'] = bank_df.apply(lambda x: x['balance'] * 30 if x['currency'] == 'USD' else x['balance'], axis=1)
+            fig = px.pie(bank_df, names='name', values='TRY_Value', title='Banka Varlıkları Dağılımı', hole=0.5, color_discrete_sequence=px.colors.sequential.Plasma)
+            fig.update_traces(textfont=dict(size=14, color='white'))
+            fig.update_layout(paper_bgcolor='#803811', plot_bgcolor='#803811', font=dict(color='white', size=14), title=dict(font=dict(size=16)), margin=dict(l=6,r=6,t=30,b=6))
+            st.plotly_chart(fig, width='stretch', height=300)
 
-# --- SAYFA: İŞLEM EKLE ---
+# --- PAGE: İŞLEM EKLE (GÜNCELLENMİŞ ARAYÜZ) ---
 elif page == "İşlem Ekle":
     st.subheader("Yeni Gelir veya Gider Ekle")
+    
+    # --- TÜR SEÇİMİ (BUTONLAR) ---
+    # State initialization for transaction type selection
+    if 'tx_type_selection' not in st.session_state:
+        st.session_state.tx_type_selection = 'Income'
 
-    # Edit mode: if editing_tx is set in session_state, show edit form
+    # Check if editing mode to sync buttons
     editing_tx = st.session_state.get('editing_tx')
     if editing_tx:
         tx = get_transaction_by_id(editing_tx)
+        if tx:
+            st.session_state.tx_type_selection = tx['type']
+
+    col_type1, col_type2 = st.columns(2)
+    with col_type1:
+        if st.button("📉 GİDER", use_container_width=True, key="btn_expense_select"):
+            st.session_state.tx_type_selection = 'Expense'
+            st.rerun()
+    
+    with col_type2:
+        if st.button("📈 GELİR", use_container_width=True, key="btn_income_select"):
+            st.session_state.tx_type_selection = 'Income'
+            st.rerun()
+
+    # Visual Feedback Box for Selection
+    sel_type = st.session_state.tx_type_selection
+    if sel_type == 'Income':
+        st.success(f"**Seçilen:** :green[+ GELİR]", icon="🟢")
+    else:
+        st.error(f"**Seçilen:** :red[- GİDER]", icon="🔴")
+    
+    st.markdown("---")
+
+    # --- DÜZENLEME FORMU ---
+    if editing_tx:
+        tx = get_transaction_by_id(editing_tx)
         if not tx:
-            st.error("Düzenlenecek işlem bulunamadı veya silinmiş.")
+            st.error("Düzenlenecek işlem bulunamadı.")
             st.session_state.pop('editing_tx', None)
         else:
             with st.form("edit_transaction_form"):
+                # Type comes from session state buttons above
+                t_type = st.session_state.tx_type_selection 
+                
+                # Other fields
                 col1, col2 = st.columns(2)
                 with col1:
-                    t_type = st.selectbox("Tür", ["Income", "Expense"], index=0 if tx['type'] == 'Income' else 1)
                     amount = st.number_input("Tutar", min_value=0.01, value=float(tx['amount']), format="%.2f")
                 with col2:
-                    category = st.text_input("Kategori (Örn: Market, Maaş)", tx['category'])
                     date = st.date_input("Tarih", pd.to_datetime(tx['date']).date())
+                
+                # Payment Method
+                payment_methods = get_payment_methods()
+                current_pm = tx.get('payment_method', 'Nakit')
+                if current_pm not in payment_methods:
+                    payment_methods.append(current_pm)
+                
+                payment_method = st.selectbox("Ödeme Yöntemi / Kaynak", payment_methods, index=payment_methods.index(current_pm))
+                
+                # Category (Selectbox from list)
+                categories = get_transaction_categories()
+                category = st.selectbox("Kategori", categories, index=categories.index(tx['category']) if tx['category'] in categories else 0)
+
                 desc = st.text_area("Açıklama", tx.get('description',''))
+                
                 col_ok, col_cancel = st.columns([1,1])
                 with col_ok:
                     if st.form_submit_button("Güncelle"):
                         try:
-                            update_transaction_db(editing_tx, t_type, amount, category, date, desc)
+                            update_transaction_db(editing_tx, t_type, amount, category, date, desc, payment_method)
                             st.session_state.transactions = load_transactions_from_db()
-                            st.success("İşlem güncellendi!")
-                            log_debug(f"Updated transaction: {editing_tx}")
+                            st.success("İşlem ve banka bakiyesi güncellendi!")
                             st.session_state.pop('editing_tx', None)
                             st.rerun()
                         except Exception as e:
-                            st.error(f"Güncelleme sırasında hata: {e}")
-                            log_debug(f"Update error for {editing_tx}: {e}")
-                            import traceback
-                            traceback.print_exc()
+                            st.error(f"Güncelleme hatası: {e}")
                 with col_cancel:
                     if st.form_submit_button("İptal", key="cancel_edit"):
                         st.session_state.pop('editing_tx', None)
                         st.rerun()
 
-    # Add form (only shown when not editing)
+    # --- YENİ İŞLEM EKLEME FORMU ---
     if not st.session_state.get('editing_tx'):
         with st.form("transaction_form"):
+            # Type comes from session state buttons
+            t_type = st.session_state.tx_type_selection
+            
             col1, col2 = st.columns(2)
             with col1:
-                t_type = st.selectbox("Tür", ["Income", "Expense"])
                 amount = st.number_input("Tutar", min_value=0.01, format="%.2f")
             with col2:
-                category = st.text_input("Kategori (Örn: Market, Maaş)", "Genel")
                 date = st.date_input("Tarih", datetime.date.today())
+            
+            payment_methods = get_payment_methods()
+            payment_method = st.selectbox("Ödeme Yöntemi / Kaynak", payment_methods, index=0)
+            
+            # Category Selection from List
+            categories = get_transaction_categories()
+            # Default based on type: 'Maaş' for Income, 'Alışveriş' for Expense (heuristic)
+            default_idx = 0 # Maaş
+            if t_type == 'Expense':
+                default_idx = 3 # Alışveriş
+            
+            category = st.selectbox("Kategori", categories, index=default_idx)
+
             desc = st.text_area("Açıklama")
             submitted = st.form_submit_button("Kaydet")
 
             if submitted:
-                add_transaction(t_type, amount, category, date, desc)
-                st.success("İşlem başarıyla eklendi!")
+                add_transaction(t_type, amount, category, date, desc, payment_method)
+                is_bank = False
+                for acc in st.session_state.bank_accounts:
+                    if acc['name'] == payment_method:
+                        is_bank = True
+                        break
+                if is_bank:
+                    st.success(f"İşlem eklendi ve {payment_method} bakiyesi güncellendi!")
+                else:
+                    st.success("İşlem başarıyla eklendi!")
 
     st.markdown("---")
 
-    # List existing transactions (with edit/delete)
+    # --- LİSTELEME ---
     st.markdown("### Mevcut İşlemler")
     tx_df = st.session_state.transactions.sort_values('date', ascending=False).reset_index(drop=True)
 
-    # --- Filtreler (Tür, Tarih aralığı, Kategori, Ara) ---
-    # initialize defaults if missing
+    # Filtreler
     if 'tx_filter_type' not in st.session_state:
         st.session_state['tx_filter_type'] = 'Tümü'
     if 'tx_filter_cat' not in st.session_state:
@@ -531,23 +608,21 @@ elif page == "İşlem Ekle":
         st.session_state['tx_filter_max_date'] = tx_df['date'].max().date() if not tx_df.empty else datetime.date.today()
 
     with st.expander("Filtreler", expanded=False):
-        # All filters side-by-side
         col_type, col_min, col_max, col_cat, col_search, col_clear = st.columns([1,1,1,1,2,0.6])
         with col_type:
-            st.selectbox("Tür", ["Tümü", "Income", "Expense"], key='tx_filter_type')
+            st.selectbox("Tür", ["Tümü", "Gelir", "Gider"], key='tx_filter_type', format_func=lambda x: 'Income' if x=='Gelir' else ('Expense' if x=='Gider' else x))
         with col_min:
             st.date_input("Başlangıç", key='tx_filter_min_date')
         with col_max:
             st.date_input("Bitiş", key='tx_filter_max_date')
         with col_cat:
-            categories = ["Tümü"] + sorted(tx_df['category'].dropna().unique().tolist()) if not tx_df.empty else ["Tümü"]
+            categories = ["Tümü"] + get_transaction_categories()
             st.selectbox("Kategori", categories, key='tx_filter_cat')
         with col_search:
-            st.text_input("Ara (Kategori veya Açıklama)", key='tx_filter_search', placeholder="Örn: market, maaş")
+            st.text_input("Ara", key='tx_filter_search', placeholder="Örn: market, maaş")
         with col_clear:
             st.write("")
             if st.button("Temizle", key="clear_filters"):
-                # Remove keys so widgets re-initialize to their default values on next run
                 st.session_state.pop('tx_filter_type', None)
                 st.session_state.pop('tx_filter_cat', None)
                 st.session_state.pop('tx_filter_search', None)
@@ -555,12 +630,14 @@ elif page == "İşlem Ekle":
                 st.session_state.pop('tx_filter_max_date', None)
                 st.rerun()
 
-    # Apply filters to the transaction list
     tx_filtered = tx_df.copy()
     # Type filter
-    if st.session_state.get('tx_filter_type') and st.session_state['tx_filter_type'] != 'Tümü':
-        tx_filtered = tx_filtered[tx_filtered['type'] == st.session_state['tx_filter_type']]
-    # Date range filter
+    tf_type = st.session_state.get('tx_filter_type')
+    if tf_type and tf_type != 'Tümü':
+        # Mapping Turkish UI back to DB values
+        db_type = 'Income' if tf_type == 'Gelir' else 'Expense'
+        tx_filtered = tx_filtered[tx_filtered['type'] == db_type]
+    # Date filter
     try:
         min_d = pd.to_datetime(st.session_state['tx_filter_min_date'])
         max_d = pd.to_datetime(st.session_state['tx_filter_max_date'])
@@ -570,47 +647,51 @@ elif page == "İşlem Ekle":
     # Category filter
     if st.session_state.get('tx_filter_cat') and st.session_state['tx_filter_cat'] != 'Tümü':
         tx_filtered = tx_filtered[tx_filtered['category'] == st.session_state['tx_filter_cat']]
-    # Search (category or description)
+    # Search
     q = st.session_state.get('tx_filter_search','').strip().lower()
     if q:
-        tx_filtered = tx_filtered[tx_filtered['category'].fillna('').str.lower().str.contains(q) | tx_filtered['description'].fillna('').str.lower().str.contains(q)]
+        tx_filtered = tx_filtered[tx_filtered['category'].fillna('').str.lower().str.contains(q) | 
+                                  tx_filtered['description'].fillna('').str.lower().str.contains(q) |
+                                  tx_filtered['payment_method'].fillna('').str.lower().str.contains(q)]
 
     st.write(f"Sonuç: **{len(tx_filtered)}** işlem gösteriliyor")
 
     if tx_filtered.empty:
         st.info("Filtrelere uygun işlem bulunamadı.")
     else:
-        # Show header row
-        h1, h2, h3, h4, h5 = st.columns([1,1,2,1,2])
+        h1, h2, h3, h4, h5, h6 = st.columns([1,1,2,1,2,2])
         h1.markdown("**Tarih**")
         h2.markdown("**Tür**")
         h3.markdown("**Kategori**")
         h4.markdown("**Tutar**")
-        h5.markdown("**Aksiyon**")
+        h5.markdown("**Yöntem**")
+        h6.markdown("**Aksiyon**")
 
         for _, row in tx_filtered.iterrows():
-            c1, c2, c3, c4, c5 = st.columns([1,1,2,1,2])
-            # Improved date rendering for readability
+            c1, c2, c3, c4, c5, c6 = st.columns([1,1,2,1,2,2])
             date_str = pd.to_datetime(row['date']).date()
             c1.markdown(f"<div style='font-size:14px; font-weight:600; font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;'>{date_str}</div>", unsafe_allow_html=True)
-            c2.write(row['type'])
+            
+            # Translate Type to Turkish for display
+            display_type = "GELİR" if row['type'] == 'Income' else "GİDER"
+            c2.markdown(f"<span style='color: {'#22c55e' if row['type'] == 'Income' else '#ef4444'}; font-weight:bold;'>{display_type}</span>", unsafe_allow_html=True)
+            
             c3.write(row['category'])
             c4.write(f"{row['amount']:,.2f}")
+            
+            p_method = row.get('payment_method', '-')
+            c5.write(p_method)
 
-            # Action buttons (side-by-side)
             row_id_str = str(row['id'])
-            btn_edit_col, btn_del_col = c5.columns([1,1])
+            btn_edit_col, btn_del_col = c6.columns([1,1])
             if btn_edit_col.button("Düzenle", key=f"edit_{row_id_str}"):
-                log_debug(f"Edit requested: {row_id_str}")
                 st.session_state['editing_tx'] = row_id_str
                 st.rerun()
 
             if btn_del_col.button("Sil", key=f"del_{row_id_str}"):
-                log_debug(f"Delete requested (confirm stage): {row_id_str}")
                 st.session_state[f'confirm_del_{row_id_str}'] = True
                 st.rerun()
 
-            # If confirmation requested, show confirm/cancel
             if st.session_state.get(f'confirm_del_{row_id_str}'):
                 with st.expander("Silme Onayı", expanded=True):
                     st.warning("Bu işlemi silmek istediğinize emin misiniz?")
@@ -619,35 +700,20 @@ elif page == "İşlem Ekle":
                         try:
                             delete_transaction_db(row_id_str)
                             st.session_state.transactions = load_transactions_from_db()
-                            st.success("İşlem silindi.")
-                            log_debug(f"Deleted transaction: {row_id_str}")
+                            st.success("İşlem silindi ve bakiye düzeltildi.")
                             st.session_state.pop(f'confirm_del_{row_id_str}', None)
                             st.rerun()
                         except Exception as e:
-                            st.error(f"Silme sırasında hata: {e}")
-                            log_debug(f"Delete error for {row_id_str}: {e}")
-                            import traceback
-                            traceback.print_exc()
+                            st.error(f"Silme hatası: {e}")
                     if col_no.button("İptal", key=f"confirm_no_{row_id_str}"):
                         st.session_state.pop(f'confirm_del_{row_id_str}', None)
                         st.rerun()
-            # Slimmer divider between transactions (further reduced spacing)
-            st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid rgba(0,0,0,0.8); height:1px;'/>", unsafe_allow_html=True)
-
-    # Debug log
-    with st.expander("Debug Log", expanded=False):
-        logs = st.session_state.get('debug_log', [])
-        if logs:
-            for l in logs[-20:]:
-                st.write(l)
-        else:
-            st.write("No debug messages yet.")
+            st.markdown("<hr style='margin:2px 0; border:none; border-top:1px solid rgba(0,0,0,0.1);'/>", unsafe_allow_html=True)
 
 # --- SAYFA: BANKA HESAPLARI ---
 elif page == "Banka Hesapları":
     st.subheader("Banka Hesaplarım")
     
-    # Yeni Hesap Ekleme Formu
     with st.expander("Yeni Hesap Ekle", expanded=True):
         with st.form("add_bank"):
             c1, c2, c3 = st.columns(3)
@@ -662,13 +728,11 @@ elif page == "Banka Hesapları":
                     'balance': b_bal, 
                     'currency': b_curr
                 }
-                # persist to DB
                 insert_bank_account_db(new_acc)
                 st.session_state.bank_accounts = load_bank_accounts_from_db()
                 st.success("Hesap eklendi!")
                 st.rerun()
 
-    # Hesap Listesi ve Silme
     st.markdown("### Hesap Listesi")
     for i, acc in enumerate(st.session_state.bank_accounts):
         col_info, col_del = st.columns([4, 1])
@@ -688,7 +752,6 @@ elif page == "Ayarlar":
     col1, col2 = st.columns(2)
     with col1:
         st.warning("Verileri Sıfırla")
-        # Require explicit confirmation before performing destructive clear
         if st.button("Bütün Verileri Temizle", key="request_clear"):
             st.session_state['confirm_clear'] = True
             st.rerun()
